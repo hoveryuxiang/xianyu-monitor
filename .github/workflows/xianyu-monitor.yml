@@ -3,9 +3,13 @@ name: 闲鱼降价监控
 on:
   schedule:
     # 每天北京时间10点和22点运行
-    # UTC时间 2点 和 14点
     - cron: '0 2,14 * * *'
   workflow_dispatch:  # 允许手动运行
+
+# 添加写入权限，用于更新Issue
+permissions:
+  contents: write
+  issues: write
 
 jobs:
   monitor:
@@ -22,12 +26,13 @@ jobs:
       
       - name: 安装依赖
         run: |
-          pip install requests
+          pip install requests pygithub
       
       - name: 运行监控脚本
         run: python xianyu_monitor.py
         env:
           SEND_KEY: ${{ secrets.SEND_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       
       - name: 保存监控数据
         run: |
