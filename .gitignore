@@ -1,3 +1,7 @@
-data/
+# 只忽略 Python 临时文件
 __pycache__/
 *.pyc
+*.pyo
+
+# data 目录不要忽略（改成注释或删除这行）
+# data/
