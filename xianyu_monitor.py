@@ -2,16 +2,16 @@ import requests
 import json
 import os
 import time
-import base64
+import hmac
 import hashlib
+import base64
+import urllib.parse
 from datetime import datetime
 
 # ========== 配置区域 ==========
-# 企业微信配置（从环境变量读取）
-CORP_ID = os.environ.get("CORP_ID", "")           # 企业ID
-AGENT_ID = os.environ.get("AGENT_ID", "")         # 应用AgentId
-CORP_SECRET = os.environ.get("CORP_SECRET", "")   # 应用Secret
-TO_USER = os.environ.get("TO_USER", "")           # 接收消息的成员ID（你的用户ID）
+# 钉钉机器人配置（从环境变量读取）
+DINGTALK_WEBHOOK = os.environ.get("DINGTALK_WEBHOOK", "")
+DINGTALK_SECRET = os.environ.get("DINGTALK_SECRET", "")
 
 # 监控商品配置
 CONFIG_FILE = "config.json"
@@ -19,117 +19,49 @@ PRICE_FILE = "data/price_record.json"
 # ============================
 
 
-class WeChatWorkBot:
-    """企业微信机器人（自建应用方式）"""
-    
-    def __init__(self, corp_id, agent_id, corp_secret):
-        self.corp_id = corp_id
-        self.agent_id = agent_id
-        self.corp_secret = corp_secret
-        self.access_token = None
-        self.token_expires_at = 0
-    
-    def get_access_token(self):
-        """获取 access_token（有效期2小时）"""
-        # 如果 token 还在有效期内，直接使用
-        if self.access_token and time.time() < self.token_expires_at:
-            return self.access_token
-        
-        url = f"https://qyapi.weixin.qq.com/cgi-bin/gettoken"
-        params = {
-            "corpid": self.corp_id,
-            "corpsecret": self.corp_secret
-        }
-        
-        try:
-            response = requests.get(url, params=params, timeout=10)
-            result = response.json()
-            
-            if result.get("errcode") == 0:
-                self.access_token = result.get("access_token")
-                # 设置过期时间（提前5分钟刷新）
-                self.token_expires_at = time.time() + result.get("expires_in", 7200) - 300
-                print(f"[{datetime.now()}] 获取 access_token 成功")
-                return self.access_token
-            else:
-                print(f"获取 access_token 失败: {result}")
-                return None
-        except Exception as e:
-            print(f"获取 access_token 异常: {e}")
-            return None
-    
-    def send_text(self, content, to_user=None):
-        """发送文本消息"""
-        token = self.get_access_token()
-        if not token:
-            return False
-        
-        url = f"https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token={token}"
-        
-        # 默认发送给配置的成员
-        if to_user is None:
-            to_user = TO_USER
-        
-        data = {
-            "touser": to_user,
-            "msgtype": "text",
-            "agentid": int(self.agent_id),
-            "text": {
-                "content": content
-            },
-            "safe": 0
-        }
-        
-        try:
-            response = requests.post(url, json=data, timeout=10)
-            result = response.json()
-            
-            if result.get("errcode") == 0:
-                print(f"[{datetime.now()}] 企业微信消息发送成功")
-                return True
-            else:
-                print(f"[{datetime.now()}] 企业微信消息发送失败: {result}")
-                return False
-        except Exception as e:
-            print(f"发送消息异常: {e}")
-            return False
-    
-    def send_markdown(self, content, to_user=None):
-        """发送 Markdown 格式消息（支持更丰富的样式）"""
-        token = self.get_access_token()
-        if not token:
-            return False
-        
-        url = f"https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token={token}"
-        
-        if to_user is None:
-            to_user = TO_USER
-        
-        data = {
-            "touser": to_user,
-            "msgtype": "markdown",
-            "agentid": int(self.agent_id),
-            "markdown": {
-                "content": content
-            }
-        }
-        
-        try:
-            response = requests.post(url, json=data, timeout=10)
-            result = response.json()
-            
-            if result.get("errcode") == 0:
-                print(f"[{datetime.now()}] 企业微信消息发送成功 (Markdown)")
-                return True
-            else:
-                print(f"[{datetime.now()}] 企业微信消息发送失败: {result}")
-                return False
-        except Exception as e:
-            print(f"发送消息异常: {e}")
-            return False
+def send_dingtalk_message(title, content):
+    """
+    通过钉钉自定义机器人发送消息到钉钉群
+    """
+    if not DINGTALK_WEBHOOK or not DINGTALK_SECRET:
+        print("❌ 钉钉机器人配置缺失，请检查 GitHub Secrets")
+        print("   需要配置: DINGTALK_WEBHOOK 和 DINGTALK_SECRET")
+        return False
 
+    # 1. 生成签名
+    timestamp = str(round(time.time() * 1000))
+    secret_enc = DINGTALK_SECRET.encode('utf-8')
+    string_to_sign = '{}\n{}'.format(timestamp, DINGTALK_SECRET)
+    string_to_sign_enc = string_to_sign.encode('utf-8')
+    hmac_code = hmac.new(secret_enc, string_to_sign_enc, digestmod=hashlib.sha256).digest()
+    sign = urllib.parse.quote_plus(base64.b64encode(hmac_code))
+    
+    # 2. 拼接完整的请求地址
+    full_url = f"{DINGTALK_WEBHOOK}&timestamp={timestamp}&sign={sign}"
+    
+    # 3. 构建消息内容
+    headers = {'Content-Type': 'application/json'}
+    data = {
+        "msgtype": "markdown",
+        "markdown": {
+            "title": title,
+            "text": f"## {title}\n\n{content}"
+        }
+    }
+    
+    try:
+        response = requests.post(full_url, headers=headers, json=data, timeout=10)
+        result = response.json()
+        if result.get("errcode") == 0:
+            print(f"[{datetime.now()}] ✅ 钉钉消息发送成功")
+            return True
+        else:
+            print(f"[{datetime.now()}] ❌ 钉钉消息发送失败: {result}")
+            return False
+    except Exception as e:
+        print(f"[{datetime.now()}] ❌ 发送异常: {e}")
+        return False
 
-# ========== 以下是你之前的功能代码，稍作修改 ==========
 
 def load_config():
     """加载商品配置"""
@@ -139,6 +71,18 @@ def load_config():
             return config.get("watch_items", [])
     except FileNotFoundError:
         print("错误：找不到 config.json 文件")
+        print("请创建 config.json 文件，格式如下：")
+        print('''
+{
+    "watch_items": [
+        {
+            "id": "商品ID",
+            "name": "商品名称",
+            "last_price": 5000
+        }
+    ]
+}
+        ''')
         return []
     except json.JSONDecodeError:
         print("错误：config.json 格式不正确")
@@ -166,14 +110,26 @@ def get_item_price(item_id):
     """
     获取商品当前价格
     
-    注意：这里需要你选择价格获取方式
-    当前返回 None 表示未实现
+    注意：闲鱼没有公开API，这里需要你选择一种方式：
+    
+    方案1：使用第三方API（推荐）
+        - 阿里云API市场搜索"闲鱼商品详情"
+        - 获取AppKey后在这里调用
+    
+    方案2：手动更新价格（简单）
+        - 自己在 config.json 里修改 last_price
+        - 程序只负责发送降价通知
+    
+    当前返回 None 表示未实现价格获取
+    你也可以直接返回一个测试价格来验证整个流程：
+        return 4800  # 假设降价了
     """
     # TODO: 这里替换为实际的价格获取逻辑
+    # 临时返回 None，表示暂未获取到价格
     return None
 
 
-def check_price_changes(bot):
+def check_price_changes():
     """检查所有商品价格变化"""
     print(f"[{datetime.now()}] 开始检查价格...")
     
@@ -184,7 +140,7 @@ def check_price_changes(bot):
     
     price_history = load_price_history()
     price_changed = False
-    changed_items = []  # 记录降价的商品
+    changed_items = []
     
     for item in watch_items:
         item_id = item["id"]
@@ -223,9 +179,8 @@ def check_price_changes(bot):
     
     # 如果有降价，发送通知
     if price_changed:
-        # 发送合并通知（把所有降价商品放在一条消息里）
         title = f"💰 发现 {len(changed_items)} 个商品降价！"
-        content = f"### {title}\n\n"
+        content = ""
         for item in changed_items:
             content += f"**{item['name']}**\n"
             content += f"- 原价：¥{item['last_price']}\n"
@@ -233,61 +188,57 @@ def check_price_changes(bot):
             content += f"- 降价：¥{item['drop_amount']}（{item['drop_percent']:.1f}%）\n"
             content += f"[点击查看]({item['url']})\n\n"
         
-        bot.send_markdown(content)
+        send_dingtalk_message(title, content)
     else:
         print(f"[{datetime.now()}] 未发现价格变化")
 
 
-def test_connection(bot):
-    """测试企业微信连接"""
-    print("测试企业微信连接...")
-    content = f"""## ✅ 闲鱼监控机器人已启动
-
-**启动时间**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+def test_connection():
+    """测试钉钉连接"""
+    print("=" * 50)
+    print("测试钉钉机器人连接...")
+    print("=" * 50)
+    
+    if not DINGTALK_WEBHOOK or not DINGTALK_SECRET:
+        print("❌ 钉钉配置缺失！")
+        print("\n请在 GitHub Secrets 中配置：")
+        print("  - DINGTALK_WEBHOOK: 钉钉机器人的 Webhook 地址")
+        print("  - DINGTALK_SECRET: 钉钉机器人的加签密钥")
+        print("\n获取方式：")
+        print("  1. 打开钉钉，创建群聊")
+        print("  2. 群设置 → 机器人 → 添加机器人 → 自定义")
+        print("  3. 复制 Webhook 地址和加签密钥")
+        return False
+    
+    title = "✅ 闲鱼监控机器人已启动"
+    content = f"""**启动时间**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
 **配置状态**：
-- 企业ID：{CORP_ID[:5]}...
-- 应用AgentId：{AGENT_ID}
-- 接收成员：{TO_USER}
+- Webhook：已配置
+- 加签密钥：已配置
 
 **下一步**：
 1. 编辑 config.json 添加要监控的商品
-2. 实现 get_item_price 函数获取价格
+2. 实现 get_item_price 函数获取价格（或手动更新价格）
 3. 等待定时任务运行
 
 ---
 
-*如果收到这条消息，说明企业微信配置正确！*"""
+*如果你收到这条消息，说明钉钉配置正确！*"""
     
-    return bot.send_markdown(content)
+    return send_dingtalk_message(title, content)
 
 
 def main():
     print("=" * 50)
-    print("闲鱼降价监控机器人（企业微信版）")
+    print("闲鱼降价监控机器人（钉钉版）")
     print("=" * 50)
     
-    # 检查配置
-    if not CORP_ID or not AGENT_ID or not CORP_SECRET:
-        print("错误：请先配置企业微信环境变量！")
-        print("需要在 GitHub Secrets 中配置：")
-        print("  - CORP_ID")
-        print("  - AGENT_ID")
-        print("  - CORP_SECRET")
-        print("  - TO_USER")
-        return
-    
-    if not TO_USER:
-        print("警告：未配置 TO_USER，消息将发送到企业微信全员")
-    
-    # 初始化机器人
-    bot = WeChatWorkBot(CORP_ID, AGENT_ID, CORP_SECRET)
-    
-    # 测试连接
-    test_connection(bot)
+    # 测试钉钉连接
+    test_connection()
     
     # 检查价格变化
-    check_price_changes(bot)
+    check_price_changes()
     
     print("=" * 50)
     print("运行完成")
