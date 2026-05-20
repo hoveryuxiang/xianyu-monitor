@@ -1,167 +1,148 @@
 import requests
 import json
 import os
-import re
+import time
+import base64
+import hashlib
 from datetime import datetime
-from github import Github
 
 # ========== 配置区域 ==========
-SEND_KEY = os.environ.get("SEND_KEY", "")
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
-REPO_NAME = os.environ.get("GITHUB_REPOSITORY", "")
-ISSUE_TITLE = "闲鱼监控列表"  # 固定的Issue标题
+# 企业微信配置（从环境变量读取）
+CORP_ID = os.environ.get("CORP_ID", "")           # 企业ID
+AGENT_ID = os.environ.get("AGENT_ID", "")         # 应用AgentId
+CORP_SECRET = os.environ.get("CORP_SECRET", "")   # 应用Secret
+TO_USER = os.environ.get("TO_USER", "")           # 接收消息的成员ID（你的用户ID）
+
+# 监控商品配置
+CONFIG_FILE = "config.json"
 PRICE_FILE = "data/price_record.json"
 # ============================
 
 
-def get_watch_items_from_issue():
-    """
-    从GitHub Issue读取商品监控列表
-    Issue中的格式示例：
+class WeChatWorkBot:
+    """企业微信机器人（自建应用方式）"""
     
-    商品ID | 商品名称 | 当前价格
-    1234567890 | iPhone 14 Pro | 5000
-    0987654321 | 索尼相机 | 3000
+    def __init__(self, corp_id, agent_id, corp_secret):
+        self.corp_id = corp_id
+        self.agent_id = agent_id
+        self.corp_secret = corp_secret
+        self.access_token = None
+        self.token_expires_at = 0
     
-    或者简单格式：
-    - 1234567890 (iPhone 14 Pro) 5000
-    """
-    if not GITHUB_TOKEN or not REPO_NAME:
-        print("缺少GitHub配置，使用默认商品列表")
-        return get_default_items()
-    
-    try:
-        g = Github(GITHUB_TOKEN)
-        repo = g.get_repo(REPO_NAME)
+    def get_access_token(self):
+        """获取 access_token（有效期2小时）"""
+        # 如果 token 还在有效期内，直接使用
+        if self.access_token and time.time() < self.token_expires_at:
+            return self.access_token
         
-        # 查找指定标题的Issue
-        issues = repo.get_issues(state='open', title=ISSUE_TITLE)
-        issue = None
-        for iss in issues:
-            if iss.title == ISSUE_TITLE:
-                issue = iss
-                break
+        url = f"https://qyapi.weixin.qq.com/cgi-bin/gettoken"
+        params = {
+            "corpid": self.corp_id,
+            "corpsecret": self.corp_secret
+        }
         
-        if not issue:
-            print(f"未找到标题为 '{ISSUE_TITLE}' 的Issue，正在创建...")
-            issue = repo.create_issue(
-                title=ISSUE_TITLE,
-                body=get_issue_template()
-            )
-            print(f"已创建Issue: {issue.html_url}")
-            return []
-        
-        # 解析Issue内容
-        content = issue.body
-        items = parse_items_from_text(content)
-        
-        if items:
-            print(f"从Issue读取到 {len(items)} 个商品")
-            for item in items:
-                print(f"  - {item['name']} (ID: {item['id']}) 价格: ¥{item['last_price']}")
-        else:
-            print("Issue中未找到有效商品，请按格式填写")
-        
-        return items
-        
-    except Exception as e:
-        print(f"读取Issue失败: {e}")
-        return get_default_items()
-
-
-def get_issue_template():
-    """返回Issue的模板内容"""
-    return """# 闲鱼商品监控列表
-
-请按以下格式填写你要监控的商品（用空格或|分隔）：
-
-或者使用简单格式：
-## 如何获取商品ID？
-1. 打开闲鱼App
-2. 找到你想监控的商品
-3. 点击分享 → 复制链接
-4. 链接中的 id= 后面数字就是商品ID
-
-## 管理商品
-- **添加**：在上面列表中添加一行
-- **修改**：修改价格或名称
-- **删除**：删除对应行
-
-程序会每小时检查一次价格变化，降价时会发微信通知。
-"""
-
-
-def parse_items_from_text(text):
-    """从文本中解析商品信息"""
-    items = []
+        try:
+            response = requests.get(url, params=params, timeout=10)
+            result = response.json()
+            
+            if result.get("errcode") == 0:
+                self.access_token = result.get("access_token")
+                # 设置过期时间（提前5分钟刷新）
+                self.token_expires_at = time.time() + result.get("expires_in", 7200) - 300
+                print(f"[{datetime.now()}] 获取 access_token 成功")
+                return self.access_token
+            else:
+                print(f"获取 access_token 失败: {result}")
+                return None
+        except Exception as e:
+            print(f"获取 access_token 异常: {e}")
+            return None
     
-    # 格式1：ID | 名称 | 价格
-    pattern1 = r'(\d{10,})\s*[|]\s*([^|\n]+)\s*[|]\s*(\d+(?:\.\d+)?)'
-    matches1 = re.findall(pattern1, text)
-    for match in matches1:
-        items.append({
-            "id": match[0].strip(),
-            "name": match[1].strip(),
-            "last_price": float(match[2])
-        })
-    
-    # 格式2：- ID (名称) 价格
-    pattern2 = r'-\s*(\d{10,})\s*\(([^)]+)\)\s*(\d+(?:\.\d+)?)'
-    matches2 = re.findall(pattern2, text)
-    for match in matches2:
-        items.append({
-            "id": match[0].strip(),
-            "name": match[1].strip(),
-            "last_price": float(match[2])
-        })
-    
-    # 格式3：ID 名称 价格（空格分隔）
-    if not items:
-        lines = text.strip().split('\n')
-        for line in lines:
-            parts = line.strip().split()
-            if len(parts) >= 3 and parts[0].isdigit() and len(parts[0]) >= 10:
-                try:
-                    price = float(parts[-1])
-                    name = ' '.join(parts[1:-1])
-                    items.append({
-                        "id": parts[0],
-                        "name": name,
-                        "last_price": price
-                    })
-                except ValueError:
-                    continue
-    
-    return items
-
-
-def get_default_items():
-    """默认商品列表（当Issue读取失败时使用）"""
-    return [
-        {"id": "1234567890", "name": "示例商品1", "last_price": 5000},
-        {"id": "0987654321", "name": "示例商品2", "last_price": 3000},
-    ]
-
-
-def send_wechat_message(title, content):
-    """通过Server酱发送微信消息"""
-    if not SEND_KEY:
-        print("未配置SEND_KEY，跳过发送")
-        return False
-    
-    url = f"https://sctapi.ftqq.com/{SEND_KEY}.send"
-    data = {"title": title, "desp": content}
-    try:
-        response = requests.post(url, data=data, timeout=10)
-        if response.status_code == 200:
-            print(f"[{datetime.now()}] 微信消息发送成功")
-            return True
-        else:
-            print(f"[{datetime.now()}] 微信消息发送失败: {response.text}")
+    def send_text(self, content, to_user=None):
+        """发送文本消息"""
+        token = self.get_access_token()
+        if not token:
             return False
-    except Exception as e:
-        print(f"[{datetime.now()}] 发送异常: {e}")
-        return False
+        
+        url = f"https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token={token}"
+        
+        # 默认发送给配置的成员
+        if to_user is None:
+            to_user = TO_USER
+        
+        data = {
+            "touser": to_user,
+            "msgtype": "text",
+            "agentid": int(self.agent_id),
+            "text": {
+                "content": content
+            },
+            "safe": 0
+        }
+        
+        try:
+            response = requests.post(url, json=data, timeout=10)
+            result = response.json()
+            
+            if result.get("errcode") == 0:
+                print(f"[{datetime.now()}] 企业微信消息发送成功")
+                return True
+            else:
+                print(f"[{datetime.now()}] 企业微信消息发送失败: {result}")
+                return False
+        except Exception as e:
+            print(f"发送消息异常: {e}")
+            return False
+    
+    def send_markdown(self, content, to_user=None):
+        """发送 Markdown 格式消息（支持更丰富的样式）"""
+        token = self.get_access_token()
+        if not token:
+            return False
+        
+        url = f"https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token={token}"
+        
+        if to_user is None:
+            to_user = TO_USER
+        
+        data = {
+            "touser": to_user,
+            "msgtype": "markdown",
+            "agentid": int(self.agent_id),
+            "markdown": {
+                "content": content
+            }
+        }
+        
+        try:
+            response = requests.post(url, json=data, timeout=10)
+            result = response.json()
+            
+            if result.get("errcode") == 0:
+                print(f"[{datetime.now()}] 企业微信消息发送成功 (Markdown)")
+                return True
+            else:
+                print(f"[{datetime.now()}] 企业微信消息发送失败: {result}")
+                return False
+        except Exception as e:
+            print(f"发送消息异常: {e}")
+            return False
+
+
+# ========== 以下是你之前的功能代码，稍作修改 ==========
+
+def load_config():
+    """加载商品配置"""
+    try:
+        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+            return config.get("watch_items", [])
+    except FileNotFoundError:
+        print("错误：找不到 config.json 文件")
+        return []
+    except json.JSONDecodeError:
+        print("错误：config.json 格式不正确")
+        return []
 
 
 def load_price_history():
@@ -185,26 +166,25 @@ def get_item_price(item_id):
     """
     获取商品当前价格
     
-    注意：闲鱼没有公开API，这里需要你选择方案：
-    1. 第三方API（推荐，稳定）
-    2. 模拟请求（免费但不稳定）
-    3. 手动更新价格
+    注意：这里需要你选择价格获取方式
+    当前返回 None 表示未实现
     """
     # TODO: 这里替换为实际的价格获取逻辑
-    # 当前返回None表示获取失败
     return None
 
 
-def check_price_changes():
+def check_price_changes(bot):
     """检查所有商品价格变化"""
     print(f"[{datetime.now()}] 开始检查价格...")
     
-    watch_items = get_watch_items_from_issue()
+    watch_items = load_config()
     if not watch_items:
-        print("没有配置任何商品，请创建Issue或编辑默认列表")
+        print("没有配置任何商品，请编辑 config.json")
         return
     
     price_history = load_price_history()
+    price_changed = False
+    changed_items = []  # 记录降价的商品
     
     for item in watch_items:
         item_id = item["id"]
@@ -223,17 +203,15 @@ def check_price_changes():
         if current_price < last_price:
             drop_amount = last_price - current_price
             drop_percent = (drop_amount / last_price) * 100
-            
-            title = f"💰 {item_name} 降价了！"
-            content = f"""
-### 商品：{item_name}
-- **原价**：¥{last_price}
-- **现价**：¥{current_price}
-- **降价**：¥{drop_amount}（{drop_percent:.1f}%）
-
-[点击查看商品](https://2.taobao.com/item.htm?id={item_id})
-            """
-            send_wechat_message(title, content)
+            price_changed = True
+            changed_items.append({
+                "name": item_name,
+                "last_price": last_price,
+                "current_price": current_price,
+                "drop_amount": drop_amount,
+                "drop_percent": drop_percent,
+                "url": f"https://2.taobao.com/item.htm?id={item_id}"
+            })
         
         price_history[item_id] = {
             "name": item_name,
@@ -242,50 +220,77 @@ def check_price_changes():
         }
     
     save_price_history(price_history)
-    print(f"[{datetime.now()}] 价格检查完成")
-
-
-def create_issue_if_not_exists():
-    """确保Issue存在（首次运行时自动创建）"""
-    if not GITHUB_TOKEN or not REPO_NAME:
-        return
     
-    try:
-        g = Github(GITHUB_TOKEN)
-        repo = g.get_repo(REPO_NAME)
+    # 如果有降价，发送通知
+    if price_changed:
+        # 发送合并通知（把所有降价商品放在一条消息里）
+        title = f"💰 发现 {len(changed_items)} 个商品降价！"
+        content = f"### {title}\n\n"
+        for item in changed_items:
+            content += f"**{item['name']}**\n"
+            content += f"- 原价：¥{item['last_price']}\n"
+            content += f"- 现价：¥{item['current_price']}\n"
+            content += f"- 降价：¥{item['drop_amount']}（{item['drop_percent']:.1f}%）\n"
+            content += f"[点击查看]({item['url']})\n\n"
         
-        issues = repo.get_issues(state='all', title=ISSUE_TITLE)
-        for iss in issues:
-            if iss.title == ISSUE_TITLE:
-                if iss.state == 'closed':
-                    print(f"发现已关闭的Issue，正在重新打开...")
-                    iss.edit(state='open')
-                return
-        
-        # 创建新Issue
-        repo.create_issue(
-            title=ISSUE_TITLE,
-            body=get_issue_template()
-        )
-        print(f"已创建商品管理Issue，请访问仓库Issues页面填写商品")
-        
-    except Exception as e:
-        print(f"创建Issue失败: {e}")
+        bot.send_markdown(content)
+    else:
+        print(f"[{datetime.now()}] 未发现价格变化")
+
+
+def test_connection(bot):
+    """测试企业微信连接"""
+    print("测试企业微信连接...")
+    content = f"""## ✅ 闲鱼监控机器人已启动
+
+**启动时间**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+**配置状态**：
+- 企业ID：{CORP_ID[:5]}...
+- 应用AgentId：{AGENT_ID}
+- 接收成员：{TO_USER}
+
+**下一步**：
+1. 编辑 config.json 添加要监控的商品
+2. 实现 get_item_price 函数获取价格
+3. 等待定时任务运行
+
+---
+
+*如果收到这条消息，说明企业微信配置正确！*"""
+    
+    return bot.send_markdown(content)
 
 
 def main():
     print("=" * 50)
-    print("闲鱼降价监控机器人（Issue管理版）")
+    print("闲鱼降价监控机器人（企业微信版）")
     print("=" * 50)
     
-    # 确保Issue存在
-    create_issue_if_not_exists()
+    # 检查配置
+    if not CORP_ID or not AGENT_ID or not CORP_SECRET:
+        print("错误：请先配置企业微信环境变量！")
+        print("需要在 GitHub Secrets 中配置：")
+        print("  - CORP_ID")
+        print("  - AGENT_ID")
+        print("  - CORP_SECRET")
+        print("  - TO_USER")
+        return
     
-    # 读取商品并检查价格
-    check_price_changes()
+    if not TO_USER:
+        print("警告：未配置 TO_USER，消息将发送到企业微信全员")
+    
+    # 初始化机器人
+    bot = WeChatWorkBot(CORP_ID, AGENT_ID, CORP_SECRET)
+    
+    # 测试连接
+    test_connection(bot)
+    
+    # 检查价格变化
+    check_price_changes(bot)
     
     print("=" * 50)
-    print("提示：在仓库Issues中编辑「闲鱼监控列表」即可管理商品")
+    print("运行完成")
     print("=" * 50)
 
 
