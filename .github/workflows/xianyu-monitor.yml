@@ -25,10 +25,8 @@ jobs:
       - name: 运行监控脚本
         run: python xianyu_monitor.py
         env:
-          CORP_ID: ${{ secrets.CORP_ID }}
-          AGENT_ID: ${{ secrets.AGENT_ID }}
-          CORP_SECRET: ${{ secrets.CORP_SECRET }}
-          TO_USER: ${{ secrets.TO_USER }}
+          DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
+          DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
       
       - name: 保存监控数据
         run: |
